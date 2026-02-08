@@ -24,7 +24,7 @@ STAGE = args.stage
 print(f"[INFO] Training Stage: {STAGE}")
 
 # 指定されたstageのenvファイルを読み込む
-stage_env_path = f"/home/nkutm/workspace/2025-llm-advance-competition-main/official_content/stage{STAGE}.env"
+stage_env_path = f"/root/workspace/2025_llm_comp_main/official_content/stage{STAGE}.env"
 if not os.path.exists(stage_env_path):
     print(f"[ERROR] Stage env file not found: {stage_env_path}")
     sys.exit(1)
@@ -569,7 +569,7 @@ class LabelStatsCallback(TrainerCallback):
 
 def main():
     # MLflow設定：リポジトリ内のmlrunsディレクトリに記録
-    REPO_ROOT = "/home/nkutm/workspace/2025-llm-advance-competition-main"
+    REPO_ROOT = "/root/workspace/2025_llm_comp_main"
     mlflow_tracking_uri = f"file://{REPO_ROOT}/mlruns"
     mlflow.set_tracking_uri(mlflow_tracking_uri)
     mlflow.set_experiment(_getenv("MLFLOW_EXPERIMENT_NAME", f"llm-training-stage{STAGE}"))

@@ -18,7 +18,7 @@ evaluation.pyを実行するための評価環境を構築し、run_eval.shを�
 **問題:**
 ```
 Because only fire<=0.7.1 is available and
-2025-llm-advance-competition-main:eval depends on fire>=1.0.0
+2025_llm_comp_main:eval depends on fire>=1.0.0
 ```
 
 **原因:**
@@ -127,8 +127,8 @@ if __name__ == "__main__":
 **解決策:**
 ```python
 # evaluation.py
-INPUT_PATH  = "/home/nkutm/workspace/2025-llm-advance-competition-main/official_content/public_150.json"
-OUTPUT_PATH = "/home/nkutm/workspace/2025-llm-advance-competition-main/outputs/inference.json"
+INPUT_PATH  = "/root/workspace/2025_llm_comp_main/official_content/public_150.json"
+OUTPUT_PATH = "/root/workspace/2025_llm_comp_main/outputs/inference.json"
 ```
 
 ## セットアップ手順

@@ -236,7 +236,7 @@ python train.py --stage 3
 **方法2: 直接コマンドを実行**
 
 ```bash
-mlflow ui --backend-store-uri file:///home/nkutm/workspace/2025-llm-advance-competition-main/mlruns --port 58000
+mlflow ui --backend-store-uri file://~/workspace/2025_llm_comp_main/mlruns --port 58000
 ```
 
 ブラウザで http://localhost:58000 にアクセスすると、学習履歴やメトリクスを可視化できます。

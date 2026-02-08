@@ -13,7 +13,7 @@ dataset_links = [
     "https://huggingface.co/datasets/daichira/structured-hard-sft-4k"
 ]
 
-output_dir = "/home/nkutm/workspace/2025-llm-advance-competition-main/datasets"
+output_dir = "/root/workspace/2025_llm_comp_main/datasets"
 os.makedirs(output_dir, exist_ok=True)
 
 print(f"Downloading datasets to: {output_dir}")

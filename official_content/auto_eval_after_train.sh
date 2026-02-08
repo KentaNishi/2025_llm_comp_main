@@ -24,7 +24,7 @@ while true; do
             echo "Starting evaluation..."
             echo "================================================"
 
-            cd /home/nkutm/workspace/2025-llm-advance-competition-main
+            cd ~/workspace/2025_llm_comp_main
             bash scripts/run_eval.sh 2>&1 | tee official_content/evaluation.log
 
             echo ""

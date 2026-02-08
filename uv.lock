@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.12"
 
 [[package]]
-name = "2025-llm-advance-competition-main"
+name = "2025_llm_comp_main"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

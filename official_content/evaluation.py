@@ -22,14 +22,14 @@ MERGED_MODEL_ID_OR_PATH = "your_id/your-merged-repo"
 # あなたがHuggingFaceにアップロードしたアダプタのIDを入れてください。
 # "adapter_merge"を選択した場合に記入
 # ローカルの学習済みアダプターを使用
-ADAPTER_ID       = "/home/nkutm/workspace/2025-llm-advance-competition-main/output/lora_structeval_t_qwen3_4b_stage1"
+ADAPTER_ID       = "/root/workspace/2025_llm_comp_main/output/lora_structeval_t_qwen3_4b_stage1"
 
 # merge済モデルの一時保存
 MERGED_LOCAL_DIR = "./merged_model"
 
 # 入力（150問）と出力（提出用）ファイルパスの指定
-INPUT_PATH  = "/home/nkutm/workspace/2025-llm-advance-competition-main/official_content/public_150.json"
-OUTPUT_PATH = "/home/nkutm/workspace/2025-llm-advance-competition-main/outputs/inference.json"
+INPUT_PATH  = "/root/workspace/2025_llm_comp_main/official_content/public_150.json"
+OUTPUT_PATH = "/root/workspace/2025_llm_comp_main/outputs/inference.json"
 
 
 TEMPERATURE = 0.0

@@ -21,6 +21,6 @@ source .venv-eval/bin/activate
 
 # Run the evaluation
 echo "Running evaluation script..."
-python3 /home/nkutm/workspace/2025-llm-advance-competition-main/official_content/evaluation.py "$@"
+python3 ~/workspace/2025_llm_comp_main/official_content/evaluation.py "$@"
 
 echo "Evaluation complete!"
