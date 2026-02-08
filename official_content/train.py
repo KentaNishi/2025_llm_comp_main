@@ -89,8 +89,8 @@ LORA_TARGET_MODULES = (
 
 # Train hyperparams（学習の基本設定）
 NUM_TRAIN_EPOCHS            = _getenv_int("SFT_EPOCHS", 1)
-PER_DEVICE_TRAIN_BATCH_SIZE = _getenv_int("SFT_PER_DEVICE_TRAIN_BS", 2)
-PER_DEVICE_EVAL_BATCH_SIZE  = _getenv_int("SFT_PER_DEVICE_EVAL_BS", 2)
+PER_DEVICE_TRAIN_BATCH_SIZE = _getenv_int("SFT_PER_DEVICE_TRAIN_BS", 16)
+PER_DEVICE_EVAL_BATCH_SIZE  = _getenv_int("SFT_PER_DEVICE_EVAL_BS", 16)
 
 # 勾配累積：GPUに一度に載せられるバッチが小さい時に、複数ステップ分を貯めて“大きいバッチ相当”にする
 GRAD_ACCUM                  = _getenv_int("SFT_GRAD_ACCUM", 8)
@@ -394,6 +394,27 @@ def load_and_mix_datasets() -> Dataset:
 
     print(f"[INFO] Loading and mixing {len(mix_config)} datasets...")
 
+    # 同一著者のデータセットのみMix対象とする
+    ref_author = None
+    filtered_mix_config = []
+    for cfg in mix_config:
+        if not isinstance(cfg, dict):
+            continue
+        dataset_id = cfg.get("id", "")
+        if not dataset_id or "/" not in dataset_id:
+            continue
+        author = dataset_id.split("/")[0]
+        if ref_author is None:
+            ref_author = author
+        if author != ref_author:
+            print(f"[WARNING] Skipping dataset '{dataset_id}': author '{author}' differs from reference author '{ref_author}'")
+            continue
+        filtered_mix_config.append(cfg)
+
+    if len(filtered_mix_config) < len(mix_config):
+        print(f"[INFO] Filtered mix_config: {len(mix_config)} -> {len(filtered_mix_config)} entries (same author: '{ref_author}')")
+    mix_config = filtered_mix_config
+
     datasets = []
     weights = []
 
@@ -479,9 +500,9 @@ def load_and_mix_datasets() -> Dataset:
     # Datasetオブジェクトとして構築
     from datasets import Dataset
 
-    # サンプルから列名を取得
+    # サンプルから列名を取得（全データセットの共通列のみ）
     if len(all_samples) > 0:
-        column_names = list(all_samples[0].keys())
+        column_names = list(set.intersection(*[set(ds.column_names) for ds in datasets]))
         # 各列のデータを収集
         columns_data = {col: [sample[col] for sample in all_samples] for col in column_names}
         mixed_dataset = Dataset.from_dict(columns_data)
@@ -704,7 +725,7 @@ def main():
         save_steps=SAVE_STEPS,
         save_total_limit=SAVE_TOTAL_LIMIT,
 
-        max_steps=MAX_STEPS,  # -1 => epoch-based
+        max_steps=-1,#MAX_STEPS,  # -1 => epoch-based
 
         bf16=True,            # RTX 5080などの新しいGPUではbfloat16を使用
         fp16=False,

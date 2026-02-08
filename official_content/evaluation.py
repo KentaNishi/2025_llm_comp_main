@@ -22,7 +22,7 @@ MERGED_MODEL_ID_OR_PATH = "your_id/your-merged-repo"
 # あなたがHuggingFaceにアップロードしたアダプタのIDを入れてください。
 # "adapter_merge"を選択した場合に記入
 # ローカルの学習済みアダプターを使用
-ADAPTER_ID       = "/root/workspace/2025_llm_comp_main/output/lora_structeval_t_qwen3_4b_stage1"
+ADAPTER_ID       = "/root/workspace/2025_llm_comp_main/output/lora_structeval_t_qwen3_4b_stage1/checkpoint-19"
 
 # merge済モデルの一時保存
 MERGED_LOCAL_DIR = "./merged_model"

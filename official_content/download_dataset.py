@@ -10,7 +10,8 @@ dataset_links = [
     "https://huggingface.co/datasets/u-10bei/structured_data_with_cot_dataset",
     "https://huggingface.co/datasets/daichira/structured-3k-mix-sft",
     "https://huggingface.co/datasets/daichira/structured-5k-mix-sft",
-    "https://huggingface.co/datasets/daichira/structured-hard-sft-4k"
+    "https://huggingface.co/datasets/daichira/structured-hard-sft-4k",
+    "https://huggingface.co/datasets/u-10bei/dpo-dataset-qwen-cot"
 ]
 
 output_dir = "/root/workspace/2025_llm_comp_main/datasets"
