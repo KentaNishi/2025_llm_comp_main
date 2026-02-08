@@ -1,66 +1,57 @@
 """
-evaluation.py — 複数アダプタマージ条件対応の評価スクリプト
+4ステージ (SFT s1/s2/s3 + DPO) の組み合わせマージ探索
+--part 1: Device 2 (ベースライン s1/s2 + Linear系)
+--part 2: Device 3 (ベースライン s3/dpo + SLERP/TA/TIES)
+--part all: 全部実行 (デフォルト)
 
-モード:
-  --mode single : 単一アダプタ → vLLM推論 → submission.json (従来互換)
-  --mode multi  : 複数マージ条件で一括評価 → 比較 → ベストで提出用JSON生成
+マージ対象:
+  - SFT Stage 1 (v2, checkpoint-100)
+  - SFT Stage 2 (v2, checkpoint-100)
+  - SFT Stage 3 (v2, checkpoint-100)
+  - DPO Stage 1 (checkpoint-505, SFT s3 ベース)
 
-マルチモード パート分割 (--part):
-  1   : ベースライン(s1,s2) + Linear系
-  2   : ベースライン(s3,dpo) + SLERP/TA/TIES
-  all : 全部実行 (デフォルト)
-
-※ multi モードではマージ済みモデルをディスクに保存せず、メモリ上で直接評価する
+※ マージ済みモデルはディスクに保存せず、メモリ上で直接評価する
 """
-
-# ------------------------------------------------------------
-# 1) Config
-# ------------------------------------------------------------
 import os
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-os.environ["VLLM_LOGGING_LEVEL"] = "INFO"
+os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
 
 import argparse
 import gc
 import json
-import re
 import time
 import tomllib
 import csv
+import re
 import xml.etree.ElementTree as ET
 from io import StringIO
 from pathlib import Path
 
 import torch
+import numpy as np
 import yaml
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 
 # ============================================================
-# パス設定
+# 設定
 # ============================================================
 BASE_MODEL_ID = "Qwen/Qwen3-4B-Instruct-2507"
 OUTPUT_ROOT = Path(os.path.expanduser("~/workspace/2025_llm_comp_main/output"))
 INPUT_PATH = Path(os.path.expanduser("~/workspace/2025_llm_comp_main/official_content/public_150.json"))
-OUTPUT_PATH = Path(os.path.expanduser("~/workspace/2025_llm_comp_main/outputs/submission.json"))
 RESULT_DIR = Path(os.path.expanduser("~/workspace/2025_llm_comp_main/outputs/merge_explore"))
 
 RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
-TEMPERATURE = 0.0
-
-# アダプタパス
+# アダプタパス (全てベースモデルに対するアダプタ)
 ADAPTERS = {
     "sft_s1": OUTPUT_ROOT / "lora_structeval_t_qwen3_4b_v2_stage1" / "checkpoint-100",
     "sft_s2": OUTPUT_ROOT / "lora_structeval_t_qwen3_4b_v2_stage2" / "checkpoint-100",
     "sft_s3": OUTPUT_ROOT / "lora_structeval_t_qwen3_4b_v2_stage3" / "checkpoint-100",
 }
+# DPOはSFT s3マージ済みベースに対するアダプタ
 DPO_ADAPTER = OUTPUT_ROOT / "dpo_base_model" / "checkpoint-505"
 DPO_SFT_BASE = ADAPTERS["sft_s3"]
-
-# single モード用 (従来互換)
-SINGLE_ADAPTER_ID = str(OUTPUT_ROOT / "lora_structeval_t_qwen3_4b_stage3" / "checkpoint-51")
-SINGLE_MERGED_DIR = "./merged_model"
 
 
 # ============================================================
@@ -71,7 +62,6 @@ def merge_adapter_to_state_dict(base_id: str, adapter_path: Path) -> dict:
     print(f"  Merging: {adapter_path.name}")
     model = AutoModelForCausalLM.from_pretrained(
         base_id, torch_dtype=torch.bfloat16, device_map="auto", trust_remote_code=True)
-    tok = AutoTokenizer.from_pretrained(base_id, trust_remote_code=True)
     model = PeftModel.from_pretrained(model, str(adapter_path))
     model = model.merge_and_unload()
     state_dict = {k: v.cpu() for k, v in model.state_dict().items()}
@@ -84,7 +74,6 @@ def merge_dpo_to_state_dict(base_id: str, sft_adapter: Path, dpo_adapter: Path) 
     print(f"  Merging: SFT({sft_adapter.name}) + DPO({dpo_adapter.name})")
     model = AutoModelForCausalLM.from_pretrained(
         base_id, torch_dtype=torch.bfloat16, device_map="auto", trust_remote_code=True)
-    tok = AutoTokenizer.from_pretrained(base_id, trust_remote_code=True)
     model = PeftModel.from_pretrained(model, str(sft_adapter))
     model = model.merge_and_unload()
     model = PeftModel.from_pretrained(model, str(dpo_adapter))
@@ -125,6 +114,7 @@ def slerp(w1: dict, w2: dict, t: float) -> dict:
 
 
 def task_arithmetic(base: dict, models: list, coeffs: list) -> dict:
+    # Use intersection of keys (lm_head.weight may be tied/missing in merged models)
     common_keys = set(base.keys())
     for m in models:
         common_keys &= set(m.keys())
@@ -136,6 +126,7 @@ def task_arithmetic(base: dict, models: list, coeffs: list) -> dict:
 
 
 def ties_merge(base: dict, models: list, coeffs: list, top_k: float = 0.2) -> dict:
+    # Use intersection of keys (lm_head.weight may be tied/missing in merged models)
     common_keys = set(base.keys())
     for m in models:
         common_keys &= set(m.keys())
@@ -144,9 +135,7 @@ def ties_merge(base: dict, models: list, coeffs: list, top_k: float = 0.2) -> di
         delta = {}
         for key in common_keys:
             d = coeff * (model_w[key].float() - base[key].float())
-            abs_d = d.abs().float()
-            k = max(1, int((1.0 - top_k) * abs_d.numel()))
-            threshold = abs_d.flatten().kthvalue(k).values
+            threshold = torch.quantile(d.abs().float(), 1.0 - top_k)
             d[d.abs() < threshold] = 0.0
             delta[key] = d
         deltas.append(delta)
@@ -166,7 +155,7 @@ def ties_merge(base: dict, models: list, coeffs: list, top_k: float = 0.2) -> di
 
 
 # ============================================================
-# フォーマットバリデーション
+# 推論 (transformers, メモリ上の weights から直接ロード)
 # ============================================================
 def validate_format(text: str, output_type: str) -> tuple:
     text = text.strip()
@@ -191,96 +180,23 @@ def validate_format(text: str, output_type: str) -> tuple:
         return False, str(e)[:120]
 
 
-# ============================================================
-# MIG UUID → 整数インデックス変換
-# ============================================================
-def fix_cuda_visible_devices():
-    _cv = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-    if _cv.startswith("MIG-"):
-        import subprocess as _sp
-        _lines = _sp.run(["nvidia-smi", "-L"], capture_output=True, text=True).stdout.splitlines()
-        for _i, _line in enumerate(_lines):
-            if _cv in _line:
-                os.environ["CUDA_VISIBLE_DEVICES"] = str(_i)
-                print(f"[INFO] CUDA_VISIBLE_DEVICES: {_cv} -> {_i}")
-                return
-
-
-# ============================================================
-# 推論: vLLM → transformers フォールバック (パスベース、single モード用)
-# ============================================================
-def _generate_vllm(model_path: str, prompts: list) -> list:
-    from vllm import LLM, SamplingParams
-    configs = [
-        {"max_model_len": 4096, "max_tokens": 4096, "gpu_mem": 0.60},
-        {"max_model_len": 4096, "max_tokens": 4096, "gpu_mem": 0.65},
-        {"max_model_len": 2048, "max_tokens": 2048, "gpu_mem": 0.60},
-        {"max_model_len": 2048, "max_tokens": 2048, "gpu_mem": 0.70},
-        {"max_model_len": 2048, "max_tokens": 2048, "gpu_mem": 0.85},
-    ]
-    last_err = None
-    for idx, cfg in enumerate(configs, 1):
-        print(f"    vLLM attempt {idx}/{len(configs)}: len={cfg['max_model_len']} gpu={cfg['gpu_mem']}")
-        try:
-            llm = LLM(
-                model=model_path,
-                max_model_len=cfg["max_model_len"],
-                gpu_memory_utilization=cfg["gpu_mem"],
-                enforce_eager=True,
-                tensor_parallel_size=1,
-                disable_log_stats=True,
-            )
-            sampling = SamplingParams(temperature=TEMPERATURE, max_tokens=cfg["max_tokens"])
-            outs = llm.generate(prompts, sampling)
-            texts = [out.outputs[0].text if out.outputs else "" for out in outs]
-            del llm; gc.collect(); torch.cuda.empty_cache()
-            return texts
-        except RuntimeError as e:
-            last_err = e
-            print(f"    Failed: {str(e)[:150]}")
-            gc.collect(); torch.cuda.empty_cache()
-    raise RuntimeError(f"All vLLM configs failed. Last: {last_err}")
-
-
-def _generate_transformers(model_path: str, prompts: list) -> list:
-    """transformers フォールバック (パスベース)"""
-    print("  [transformers fallback] モデルロード中...")
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path, torch_dtype=torch.bfloat16, device_map="auto", trust_remote_code=True)
-    tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    tok.padding_side = "left"
-    if tok.pad_token_id is None:
-        tok.pad_token_id = tok.eos_token_id
-
-    texts = []
-    bs = 16
-    for start in range(0, len(prompts), bs):
-        batch = prompts[start:start + bs]
-        inputs = tok(batch, return_tensors="pt", padding=True, truncation=True,
-                     max_length=2048).to(model.device)
-        with torch.no_grad():
-            out_ids = model.generate(**inputs, max_new_tokens=2048, do_sample=False,
-                                     temperature=None, top_p=None)
-        for i, ids in enumerate(out_ids):
-            pl = inputs["input_ids"][i].shape[0]
-            texts.append(tok.decode(ids[pl:], skip_special_tokens=True))
-        print(f"    {min(start+bs, len(prompts))}/{len(prompts)}", end="\r")
-    print()
-    del model; gc.collect(); torch.cuda.empty_cache()
-    return texts
-
-
-# ============================================================
-# 推論: state_dict から直接 (multi モード用、ディスク保存なし)
-# ============================================================
-def _generate_from_weights(weights: dict, prompts: list) -> list:
-    """state_dict からモデルを構築して推論 (ディスク書き込みなし)"""
-    print("  [transformers] state_dict からモデルロード中...")
+def run_eval(weights: dict, label: str) -> dict:
+    """state_dict からモデルをロードして評価 (ディスク保存なし)"""
+    pub = json.loads(INPUT_PATH.read_text(encoding="utf-8"))
     tok = AutoTokenizer.from_pretrained(BASE_MODEL_ID, trust_remote_code=True)
     tok.padding_side = "left"
     if tok.pad_token_id is None:
         tok.pad_token_id = tok.eos_token_id
 
+    prompts, task_ids, output_types = [], [], []
+    for item in pub:
+        task_ids.append(item["task_id"])
+        output_types.append(item.get("output_type", ""))
+        msgs = [{"role": "user", "content": item.get("query", "")}]
+        prompts.append(tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True))
+
+    # state_dict からモデルを構築 (ディスク書き込みなし)
+    print(f"  [eval] {label}: モデルロード中...")
     model = AutoModelForCausalLM.from_pretrained(
         BASE_MODEL_ID, torch_dtype=torch.bfloat16, trust_remote_code=True)
     model.load_state_dict(weights, strict=False)
@@ -300,53 +216,19 @@ def _generate_from_weights(weights: dict, prompts: list) -> list:
             texts.append(tok.decode(ids[pl:], skip_special_tokens=True))
         print(f"    {min(start+bs, len(prompts))}/{len(prompts)}", end="\r")
     print()
+
     del model; gc.collect(); torch.cuda.empty_cache()
-    return texts
 
-
-def run_eval(model_path_or_weights, label: str) -> dict:
-    """推論 + バリデーション + 結果保存
-
-    model_path_or_weights: str (モデルパス) or dict (state_dict)
-    """
-    pub = json.loads(INPUT_PATH.read_text(encoding="utf-8"))
-
-    if isinstance(model_path_or_weights, dict):
-        tok = AutoTokenizer.from_pretrained(BASE_MODEL_ID, trust_remote_code=True)
-    else:
-        tok = AutoTokenizer.from_pretrained(model_path_or_weights, trust_remote_code=True)
-
-    prompts, task_ids, output_types = [], [], []
-    for item in pub:
-        task_ids.append(item["task_id"])
-        output_types.append(item.get("output_type", ""))
-        msgs = [{"role": "user", "content": item.get("query", "")}]
-        prompts.append(tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True))
-
-    if isinstance(model_path_or_weights, dict):
-        # state_dict → transformers 直接 (ディスク書き込みなし)
-        print(f"  [{label}] state_dict から推論...")
-        generated_texts = _generate_from_weights(model_path_or_weights, prompts)
-    else:
-        # パス → vLLM or transformers フォールバック
-        try:
-            print(f"  [{label}] vLLM推論...")
-            generated_texts = _generate_vllm(model_path_or_weights, prompts)
-        except Exception as e:
-            print(f"  [{label}] vLLM失敗: {e}")
-            print(f"  [{label}] transformers フォールバック...")
-            generated_texts = _generate_transformers(model_path_or_weights, prompts)
-
-    # バリデーション集計
+    # 集計
     results, valid_count, type_stats = [], 0, {}
-    for i, text in enumerate(generated_texts):
+    for i, text in enumerate(texts):
         ok, err = validate_format(text, output_types[i])
         valid_count += ok
         t = output_types[i]
         if t not in type_stats:
             type_stats[t] = {"ok": 0, "fail": 0}
         type_stats[t]["ok" if ok else "fail"] += 1
-        results.append({"task_id": task_ids[i], "generation": text,
+        results.append({"task_id": task_ids[i], "output": text,
                          "output_type": t, "valid": ok, "error": err})
 
     score = valid_count / len(pub) * 100
@@ -357,106 +239,23 @@ def run_eval(model_path_or_weights, label: str) -> dict:
     for t, s in sorted(type_stats.items()):
         print(f"    {t:6s}: {s['ok']}/{s['ok']+s['fail']}")
 
-    # 詳細結果を保存 (評価結果JSONのみ、モデル重みは保存しない)
     (RESULT_DIR / f"{label}.json").write_text(
         json.dumps({"summary": summary, "details": results}, ensure_ascii=False, indent=2))
-
-    # 提出用フォーマット (inference.json 互換: [{task_id, generation}]) も別途保存
-    inference = [{"task_id": r["task_id"], "generation": r["generation"]} for r in results]
-    (RESULT_DIR / f"{label}_inference.json").write_text(
-        json.dumps(inference, ensure_ascii=False, indent=2))
-    print(f"  [SAVED] {RESULT_DIR / f'{label}_inference.json'}")
-
     return summary
 
 
-def make_submission(label: str) -> list:
-    """保存済み結果から提出用JSONを生成"""
-    result_file = RESULT_DIR / f"{label}.json"
-    data = json.loads(result_file.read_text(encoding="utf-8"))
-    submission = [{"task_id": d["task_id"], "generation": d["generation"]}
-                  for d in data["details"]]
-    return submission
-
-
 # ============================================================
-# single モード (従来互換)
+# メイン
 # ============================================================
-def run_single_mode():
-    """従来の単一アダプタ評価"""
-    print("[MODE] single — 単一アダプタ評価")
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--part", choices=["1", "2", "all"], default="all",
+                        help="1=Linear系(Device2), 2=SLERP/TA/TIES(Device3), all=全部")
+    args = parser.parse_args()
+    part = args.part
 
-    # マージ
-    print("[INFO] Merging adapter into base model...")
-    model = AutoModelForCausalLM.from_pretrained(
-        BASE_MODEL_ID, dtype=torch.float16, device_map="auto", trust_remote_code=True)
-    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_ID, trust_remote_code=True)
-    model_to_merge = PeftModel.from_pretrained(model, SINGLE_ADAPTER_ID)
-    merged_model = model_to_merge.merge_and_unload()
-    os.makedirs(SINGLE_MERGED_DIR, exist_ok=True)
-    merged_model.save_pretrained(SINGLE_MERGED_DIR)
-    tokenizer.save_pretrained(SINGLE_MERGED_DIR)
-    del model, model_to_merge, merged_model
-    gc.collect(); torch.cuda.empty_cache()
-    print(f"[INFO] Merged model saved: {SINGLE_MERGED_DIR}")
-
-    model_path = SINGLE_MERGED_DIR
-    print(f"[INFO] Using model: {model_path}")
-
-    # プロンプト作成
-    pub = json.loads(INPUT_PATH.read_text(encoding="utf-8"))
-    assert len(pub) == 150
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    task_ids, prompts = [], []
-    for item in pub:
-        task_ids.append(item["task_id"])
-        msgs = [{"role": "user", "content": item.get("query", "")}]
-        prompts.append(tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True))
-
-    # vLLM 推論
-    from vllm import LLM, SamplingParams
-
-    TRY_CONFIGS = [
-        {"max_model_len": 4096, "max_tokens": 4096, "gpu_mem": 0.60},
-        {"max_model_len": 4096, "max_tokens": 4096, "gpu_mem": 0.65},
-        {"max_model_len": 2048, "max_tokens": 2048, "gpu_mem": 0.60},
-        {"max_model_len": 2048, "max_tokens": 2048, "gpu_mem": 0.70},
-        {"max_model_len": 2048, "max_tokens": 2048, "gpu_mem": 0.85},
-    ]
-
-    submission = None
-    for idx, cfg in enumerate(TRY_CONFIGS, 1):
-        print(f"[INFO] Attempt {idx}/{len(TRY_CONFIGS)}: len={cfg['max_model_len']} gpu={cfg['gpu_mem']}")
-        try:
-            llm = LLM(model=model_path, max_model_len=cfg["max_model_len"],
-                       gpu_memory_utilization=cfg["gpu_mem"], enforce_eager=True,
-                       tensor_parallel_size=1, disable_log_stats=True)
-            outs = llm.generate(prompts, SamplingParams(temperature=TEMPERATURE, max_tokens=cfg["max_tokens"]))
-            submission = [{"task_id": tid, "generation": out.outputs[0].text if out.outputs else ""}
-                          for tid, out in zip(task_ids, outs)]
-            print("[INFO] Generation succeeded.")
-            del llm; gc.collect(); torch.cuda.empty_cache()
-            break
-        except RuntimeError as e:
-            print(f"[WARN] Failed: {str(e)[:200]}")
-            gc.collect(); torch.cuda.empty_cache()
-
-    if submission is None:
-        raise RuntimeError("All configs failed")
-
-    assert len(submission) == 150
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT_PATH.write_text(json.dumps(submission, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"[OK] wrote: {OUTPUT_PATH} items=150")
-
-
-# ============================================================
-# multi モード (マージモデルはディスクに保存しない)
-# ============================================================
-def run_multi_mode(part: str = "all"):
-    """複数マージ条件での一括評価"""
     print("=" * 60)
-    print(f" マージ探索評価: SFT s1/s2/s3 + DPO (part={part})")
+    print(f" マージ探索: SFT s1/s2/s3 + DPO (part={part})")
     print(f" {time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(" ※ マージモデルはディスクに保存しません")
     print("=" * 60)
@@ -471,8 +270,9 @@ def run_multi_mode(part: str = "all"):
     weights["dpo"] = merge_dpo_to_state_dict(BASE_MODEL_ID, DPO_SFT_BASE, DPO_ADAPTER)
     print(f"  変換完了: {list(weights.keys())}")
 
+    need_base = part in ("2", "all")
     base_w = None
-    if part in ("2", "all"):
+    if need_base:
         print("  Loading base model...")
         base_model = AutoModelForCausalLM.from_pretrained(
             BASE_MODEL_ID, torch_dtype=torch.bfloat16, device_map="cpu", trust_remote_code=True)
@@ -496,33 +296,42 @@ def run_multi_mode(part: str = "all"):
 
         # --- 2モデル Linear ---
         print("\n  --- 2モデル Linear ---")
-        do_merge("lin_s3w70_dpow30",
+
+        do_merge("lin_s3_07_dpo_03",
                  linear_merge([weights["sft_s3"], weights["dpo"]], [0.7, 0.3]))
-        do_merge("lin_s3w50_dpow50",
+
+        do_merge("lin_s3_05_dpo_05",
                  linear_merge([weights["sft_s3"], weights["dpo"]], [0.5, 0.5]))
-        do_merge("lin_s1w50_s3w50",
+
+        do_merge("lin_s1_05_s3_05",
                  linear_merge([weights["sft_s1"], weights["sft_s3"]], [0.5, 0.5]))
-        do_merge("lin_s2w50_s3w50",
+
+        do_merge("lin_s2_05_s3_05",
                  linear_merge([weights["sft_s2"], weights["sft_s3"]], [0.5, 0.5]))
 
-        # --- 3モデル Linear ---
+        # --- 3モデル Linear (全SFT) ---
         print("\n  --- 3モデル Linear ---")
-        do_merge("lin_s1w33_s2w33_s3w33",
+
+        do_merge("lin_s1s2s3_equal",
                  linear_merge([weights["sft_s1"], weights["sft_s2"], weights["sft_s3"]],
                               [1, 1, 1]))
-        do_merge("lin_s1w20_s2w20_s3w60",
+
+        do_merge("lin_s1s2s3_s3heavy",
                  linear_merge([weights["sft_s1"], weights["sft_s2"], weights["sft_s3"]],
                               [0.2, 0.2, 0.6]))
 
-        # --- 4モデル Linear ---
+        # --- 4モデル Linear (全SFT + DPO) ---
         print("\n  --- 4モデル Linear ---")
-        do_merge("lin_s1w25_s2w25_s3w25_dpow25",
+
+        do_merge("lin_all_equal",
                  linear_merge([weights["sft_s1"], weights["sft_s2"], weights["sft_s3"], weights["dpo"]],
                               [1, 1, 1, 1]))
-        do_merge("lin_s1w10_s2w10_s3w40_dpow40",
+
+        do_merge("lin_all_s3dpo_heavy",
                  linear_merge([weights["sft_s1"], weights["sft_s2"], weights["sft_s3"], weights["dpo"]],
                               [0.1, 0.1, 0.4, 0.4]))
-        do_merge("lin_s1w10_s2w10_s3w60_dpow20",
+
+        do_merge("lin_all_s3_heavy",
                  linear_merge([weights["sft_s1"], weights["sft_s2"], weights["sft_s3"], weights["dpo"]],
                               [0.1, 0.1, 0.6, 0.2]))
 
@@ -543,37 +352,45 @@ def run_multi_mode(part: str = "all"):
 
         print("\n[Phase 4-2] SLERP / Task Arithmetic / TIES マージ戦略")
 
-        # --- SLERP (t=0でw1, t=1でw2に近づく) ---
+        # --- SLERP ---
         print("\n  --- SLERP ---")
-        do_merge("slerp_s3w70_dpow30_t03",
+
+        do_merge("slerp_s3_dpo_t03",
                  slerp(weights["sft_s3"], weights["dpo"], t=0.3))
-        do_merge("slerp_s3w50_dpow50_t05",
+
+        do_merge("slerp_s3_dpo_t05",
                  slerp(weights["sft_s3"], weights["dpo"], t=0.5))
-        do_merge("slerp_s1w50_s3w50_t05",
+
+        do_merge("slerp_s1_s3_t05",
                  slerp(weights["sft_s1"], weights["sft_s3"], t=0.5))
 
-        # --- Task Arithmetic (base + coeff * delta) ---
+        # --- Task Arithmetic ---
         print("\n  --- Task Arithmetic ---")
-        do_merge("ta_s1c05_s2c05_s3c10_dpoc03",
+
+        do_merge("ta_all_equal",
                  task_arithmetic(base_w,
                                  [weights["sft_s1"], weights["sft_s2"], weights["sft_s3"], weights["dpo"]],
                                  [0.5, 0.5, 1.0, 0.3]))
-        do_merge("ta_s3c10_dpoc03",
+
+        do_merge("ta_s3_dpo",
                  task_arithmetic(base_w,
                                  [weights["sft_s3"], weights["dpo"]],
                                  [1.0, 0.3]))
-        do_merge("ta_s1c03_s2c03_s3c12",
+
+        do_merge("ta_s3_boost",
                  task_arithmetic(base_w,
                                  [weights["sft_s1"], weights["sft_s2"], weights["sft_s3"]],
                                  [0.3, 0.3, 1.2]))
 
-        # --- TIES-Merging (top_k=残すdelta割合) ---
+        # --- TIES-Merging ---
         print("\n  --- TIES-Merging ---")
-        do_merge("ties_s1c05_s2c05_s3c10_dpoc03_k02",
+
+        do_merge("ties_all_k02",
                  ties_merge(base_w,
                             [weights["sft_s1"], weights["sft_s2"], weights["sft_s3"], weights["dpo"]],
                             [0.5, 0.5, 1.0, 0.3], top_k=0.2))
-        do_merge("ties_s3c10_dpoc05_k03",
+
+        do_merge("ties_s3_dpo_k03",
                  ties_merge(base_w,
                             [weights["sft_s3"], weights["dpo"]],
                             [1.0, 0.5], top_k=0.3))
@@ -583,26 +400,19 @@ def run_multi_mode(part: str = "all"):
         del base_w; gc.collect()
 
     # ========================================
-    # Phase 5: 最終比較 + ベストで提出用JSON生成
+    # Phase 5: 最終比較
     # ========================================
     print("\n" + "=" * 60)
     print(f" 最終比較 (part={part})")
     print("=" * 60)
     summaries.sort(key=lambda x: -x["score"])
     for i, s in enumerate(summaries):
-        marker = " <<< BEST" if i == 0 else ""
+        marker = " ★" if i == 0 else ""
         print(f"  {s['label']:30s}  {s['score']:5.1f}%  ({s['valid']}/{s['total']}){marker}")
 
     if summaries:
         best = summaries[0]
         print(f"\n[BEST] {best['label']}  score={best['score']:.1f}%")
-
-        # ベストモデルの結果から提出用JSONを生成
-        submission = make_submission(best["label"])
-        if len(submission) == 150:
-            OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-            OUTPUT_PATH.write_text(json.dumps(submission, ensure_ascii=False, indent=2), encoding="utf-8")
-            print(f"[OK] Submission ({best['label']}) → {OUTPUT_PATH}")
 
     suffix = f"_part{part}" if part != "all" else ""
     summary_path = RESULT_DIR / f"summary{suffix}.json"
@@ -610,20 +420,5 @@ def run_multi_mode(part: str = "all"):
     print(f"[OK] Summary → {summary_path}")
 
 
-# ============================================================
-# メイン
-# ============================================================
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="評価スクリプト (single/multi モード対応)")
-    parser.add_argument("--mode", choices=["single", "multi"], default="multi",
-                        help="single=従来の単一アダプタ, multi=複数マージ条件 (default: multi)")
-    parser.add_argument("--part", choices=["1", "2", "all"], default="all",
-                        help="multi時のパート: 1=Linear系, 2=SLERP/TA/TIES, all=全部 (default: all)")
-    args = parser.parse_args()
-
-    fix_cuda_visible_devices()
-
-    if args.mode == "single":
-        run_single_mode()
-    else:
-        run_multi_mode(args.part)
+    main()
