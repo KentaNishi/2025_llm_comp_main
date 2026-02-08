@@ -1,0 +1,85 @@
+[project]
+name = "2025-llm-advance-competition-main"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy==2.0.2",
+    "pandas==2.2.2",
+    "datasets==4.3.0",
+    "trl==0.24.0",
+    "transformers==4.56.2",
+    "accelerate==1.4.0",
+    "peft==0.13.2",
+    "bitsandbytes>=0.45.0",
+    "unsloth-zoo==2025.12.7",
+    "unsloth==2025.12.7",
+]
+
+[dependency-groups]
+dev = [
+    "python-dotenv>=1.2.1",
+    "pytest>=8.0.0",
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
+    "flask>=3.0.0",
+]
+
+# Validation libraries for reward functions (StructEval formats)
+validation = [
+    # JSON validation
+    "jsonschema>=4.23.0",
+
+    # XML validation
+    "lxml>=5.4.0",
+    "xmlschema>=3.4.0",
+
+    # YAML validation
+    "pyyaml>=6.0.2",
+    "yamllint>=1.35.0",
+
+    # TOML validation (using built-in tomllib in Python 3.12+)
+    # No external dependency needed
+
+    # HTML validation
+    "beautifulsoup4>=4.12.3",
+    "html5lib>=1.1",
+
+    # SQL validation
+    "sqlparse>=0.5.3",
+    "sqlvalidator>=0.0.20",
+
+    # SVG validation (XML-based)
+    "svgwrite>=1.4.3",
+
+    # LaTeX validation
+    "pylatexenc>=2.10",
+
+    # Markdown validation
+    "markdown-it-py>=3.0.0",
+
+    # JavaScript syntax validation
+    "esprima>=4.0.1",
+
+    # Multi-language syntax highlighting and validation
+    "pygments>=2.19.0",
+
+    # Additional utilities
+    "python-magic>=0.4.27",  # File type detection
+]
+
+# Evaluation environment (for StructEval)
+eval = [
+    "vllm==0.13.0",
+    "torch==2.9.0",
+    "torchaudio==2.9.0",
+    "torchvision==0.24.0",
+    "triton==3.5.0",
+    "compressed-tensors==0.12.2",
+    "openai==2.15.0",
+    "xgrammar==0.1.27",
+    "bitsandbytes==0.46.1",
+    "fire>=0.7.0",
+    # flash-attn is installed from pre-built wheel in setup_eval.sh
+]

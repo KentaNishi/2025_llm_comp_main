@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM推論比較ツール</title>
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Prism.js for syntax highlighting -->
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-javascript.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-markup.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-css.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-csv.min.js"></script>
+    <!-- PapaParse for CSV parsing -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+    <style>
+        .task-item:hover {
+            background-color: #f3f4f6;
+        }
+        .task-item.active {
+            background-color: #dbeafe;
+            border-left: 4px solid #3b82f6;
+        }
+        #generation-editor {
+            font-family: 'Courier New', monospace;
+        }
+        pre[class*="language-"] {
+            margin: 0;
+            border-radius: 0.5rem;
+        }
+        .format-badge {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        .view-toggle {
+            display: inline-flex;
+            border-radius: 0.5rem;
+            overflow: hidden;
+            border: 1px solid #d1d5db;
+        }
+        .view-toggle button {
+            padding: 0.25rem 0.75rem;
+            background: white;
+            border: none;
+            cursor: pointer;
+            font-size: 0.75rem;
+            transition: all 0.2s;
+        }
+        .view-toggle button.active {
+            background: #3b82f6;
+            color: white;
+        }
+        .view-toggle button:hover:not(.active) {
+            background: #f3f4f6;
+        }
+        .csv-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.875rem;
+        }
+        .csv-table th {
+            background: #1f2937;
+            color: white;
+            padding: 0.5rem;
+            text-align: left;
+            font-weight: 600;
+            border: 1px solid #374151;
+        }
+        .csv-table td {
+            padding: 0.5rem;
+            border: 1px solid #374151;
+            background: #111827;
+            color: #e5e7eb;
+        }
+        .csv-table tr:hover td {
+            background: #1f2937;
+        }
+        .xml-tree {
+            font-family: 'Courier New', monospace;
+            font-size: 0.875rem;
+            color: #e5e7eb;
+            padding: 1rem;
+        }
+        .xml-node {
+            margin-left: 1.5rem;
+            margin-top: 0.25rem;
+        }
+        .xml-tag {
+            color: #60a5fa;
+        }
+        .xml-attr {
+            color: #fbbf24;
+        }
+        .xml-text {
+            color: #a3e635;
+        }
+        .xml-toggle {
+            cursor: pointer;
+            user-select: none;
+            color: #9ca3af;
+        }
+        .xml-toggle:hover {
+            color: #60a5fa;
+        }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <div class="container mx-auto p-6">
+        <h1 class="text-3xl font-bold mb-6 text-gray-800">LLM推論比較ツール</h1>
+
+        <div class="grid grid-cols-12 gap-6">
+            <!-- 左側: タスクリスト -->
+            <div class="col-span-3 bg-white rounded-lg shadow-md p-4 h-screen overflow-y-auto">
+                <h2 class="text-xl font-semibold mb-4 text-gray-700">タスク一覧</h2>
+                <div id="task-list" hx-get="/api/tasks" hx-trigger="load" hx-target="#task-list">
+                    <p class="text-gray-500">読み込み中...</p>
+                </div>
+            </div>
+
+            <!-- 右側: タスク詳細 -->
+            <div class="col-span-9">
+                <div id="task-detail" class="bg-white rounded-lg shadow-md p-6">
+                    <p class="text-gray-500">左側からタスクを選択してください</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // フォーマット名からPrism言語タグへのマッピング
+        const formatToLanguage = {
+            'text': 'markup',
+            'json': 'json',
+            'csv': 'csv',
+            'xml': 'markup',
+            'html': 'markup',
+            'yaml': 'yaml',
+            'javascript': 'javascript',
+            'python': 'python',
+            'css': 'css',
+            'sql': 'sql'
+        };
+
+        // フォーマットごとの色設定
+        const formatColors = {
+            'text': 'bg-gray-500',
+            'json': 'bg-blue-500',
+            'csv': 'bg-green-500',
+            'xml': 'bg-purple-500',
+            'html': 'bg-orange-500',
+            'yaml': 'bg-yellow-500',
+            'javascript': 'bg-yellow-600',
+            'python': 'bg-blue-600',
+            'css': 'bg-pink-500',
+            'sql': 'bg-indigo-500'
+        };
+
+        // task_nameから入力と出力のフォーマットを抽出
+        function parseFormats(taskName) {
+            const match = taskName.match(/(.+)\s+to\s+(.+)/i);
+            if (match) {
+                return {
+                    input: match[1].trim().toLowerCase(),
+                    output: match[2].trim().toLowerCase()
+                };
+            }
+            return { input: 'text', output: 'text' };
+        }
+
+        // フォーマットに応じた言語タグを取得
+        function getLanguage(format) {
+            return formatToLanguage[format] || 'markup';
+        }
+
+        // フォーマットバッジの色を取得
+        function getBadgeColor(format) {
+            return formatColors[format] || 'bg-gray-500';
+        }
+
+        // CSVをHTMLテーブルに変換
+        function renderCsvTable(csvText) {
+            try {
+                const parsed = Papa.parse(csvText.trim(), { header: true });
+                if (!parsed.data || parsed.data.length === 0) {
+                    return `<pre class="text-sm whitespace-pre-wrap text-gray-300">${escapeHtml(csvText)}</pre>`;
+                }
+
+                const headers = Object.keys(parsed.data[0]);
+                let html = '<table class="csv-table"><thead><tr>';
+                headers.forEach(h => {
+                    html += `<th>${escapeHtml(h)}</th>`;
+                });
+                html += '</tr></thead><tbody>';
+
+                parsed.data.forEach(row => {
+                    html += '<tr>';
+                    headers.forEach(h => {
+                        html += `<td>${escapeHtml(row[h] || '')}</td>`;
+                    });
+                    html += '</tr>';
+                });
+                html += '</tbody></table>';
+                return html;
+            } catch (e) {
+                return `<pre class="text-sm whitespace-pre-wrap text-gray-300">${escapeHtml(csvText)}</pre>`;
+            }
+        }
+
+        // XMLをツリー構造で表示
+        function renderXmlTree(xmlText, elementId) {
+            try {
+                const parser = new DOMParser();
+                const xmlDoc = parser.parseFromString(xmlText.trim(), 'text/xml');
+
+                if (xmlDoc.querySelector('parsererror')) {
+                    return `<pre class="text-sm whitespace-pre-wrap text-gray-300">${escapeHtml(xmlText)}</pre>`;
+                }
+
+                function renderNode(node, isRoot = false) {
+                    if (node.nodeType === Node.TEXT_NODE) {
+                        const text = node.textContent.trim();
+                        return text ? `<span class="xml-text">${escapeHtml(text)}</span>` : '';
+                    }
+
+                    if (node.nodeType === Node.ELEMENT_NODE) {
+                        const hasChildren = node.children.length > 0 || (node.childNodes.length > 0 &&
+                            Array.from(node.childNodes).some(n => n.nodeType === Node.TEXT_NODE && n.textContent.trim()));
+
+                        const attrs = Array.from(node.attributes).map(attr =>
+                            `<span class="xml-attr">${attr.name}="${escapeHtml(attr.value)}"</span>`
+                        ).join(' ');
+
+                        const toggleId = `node-${Math.random().toString(36).substr(2, 9)}`;
+
+                        if (hasChildren) {
+                            let html = `<div class="xml-node">`;
+                            html += `<span class="xml-toggle" onclick="toggleXmlNode('${toggleId}')">▼</span> `;
+                            html += `<span class="xml-tag">&lt;${node.tagName}${attrs ? ' ' + attrs : ''}&gt;</span>`;
+                            html += `<div id="${toggleId}" class="xml-children">`;
+
+                            Array.from(node.childNodes).forEach(child => {
+                                html += renderNode(child);
+                            });
+
+                            html += `</div>`;
+                            html += `<span class="xml-tag">&lt;/${node.tagName}&gt;</span>`;
+                            html += `</div>`;
+                            return html;
+                        } else {
+                            return `<div class="xml-node"><span class="xml-tag">&lt;${node.tagName}${attrs ? ' ' + attrs : ''} /&gt;</span></div>`;
+                        }
+                    }
+                    return '';
+                }
+
+                return `<div class="xml-tree">${renderNode(xmlDoc.documentElement, true)}</div>`;
+            } catch (e) {
+                return `<pre class="text-sm whitespace-pre-wrap text-gray-300">${escapeHtml(xmlText)}</pre>`;
+            }
+        }
+
+        // XMLノードの折りたたみ切り替え
+        function toggleXmlNode(nodeId) {
+            const element = document.getElementById(nodeId);
+            const toggle = element.previousElementSibling.previousElementSibling;
+            if (element.style.display === 'none') {
+                element.style.display = 'block';
+                toggle.textContent = '▼';
+            } else {
+                element.style.display = 'none';
+                toggle.textContent = '▶';
+            }
+        }
+
+        // ビュー切り替え
+        function switchView(format, viewType, containerId) {
+            const container = document.getElementById(containerId);
+            const content = container.getAttribute('data-content');
+
+            // ボタンのアクティブ状態を更新
+            container.querySelectorAll('.view-toggle button').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            event.target.classList.add('active');
+
+            const contentDiv = container.querySelector('.content-display');
+
+            if (viewType === 'code') {
+                const lang = getLanguage(format);
+                contentDiv.innerHTML = `<pre class="language-${lang} text-sm"><code class="language-${lang}">${escapeHtml(content)}</code></pre>`;
+                Prism.highlightAll();
+            } else if (viewType === 'table' && format === 'csv') {
+                contentDiv.innerHTML = renderCsvTable(content);
+            } else if (viewType === 'tree' && (format === 'xml' || format === 'html')) {
+                contentDiv.innerHTML = renderXmlTree(content, containerId);
+            }
+        }
+
+        // HTMXレスポンスをカスタム処理
+        document.body.addEventListener('htmx:afterSwap', function(event) {
+            if (event.detail.target.id === 'task-list') {
+                const tasks = JSON.parse(event.detail.xhr.responseText);
+                renderTaskList(tasks);
+            } else if (event.detail.target.id === 'task-detail') {
+                const task = JSON.parse(event.detail.xhr.responseText);
+                renderTaskDetail(task);
+            }
+        });
+
+        function renderTaskList(tasks) {
+            const html = tasks.map(task => `
+                <div class="task-item p-3 mb-2 border-l-4 border-transparent rounded cursor-pointer"
+                     onclick="loadTask('${task.task_id}')">
+                    <div class="font-semibold text-sm text-gray-800">${task.task_name}</div>
+                    <div class="text-xs text-gray-500 truncate">${task.task_id}</div>
+                </div>
+            `).join('');
+            document.getElementById('task-list').innerHTML = html;
+        }
+
+        function loadTask(taskId) {
+            // アクティブ状態を更新
+            document.querySelectorAll('.task-item').forEach(item => {
+                item.classList.remove('active');
+            });
+            event.currentTarget.classList.add('active');
+
+            fetch(`/api/task/${taskId}`)
+                .then(res => res.json())
+                .then(task => renderTaskDetail(task));
+        }
+
+        function renderTaskDetail(task) {
+            // フォーマット情報を取得
+            const formats = parseFormats(task.task_name);
+            const inputLang = getLanguage(formats.input);
+            const outputLang = getLanguage(formats.output);
+            const inputBadgeColor = getBadgeColor(formats.input);
+            const outputBadgeColor = getBadgeColor(formats.output);
+
+            // クエリから実際のコードを抽出（<code>タグがある場合）
+            let inputCode = task.query;
+            const codeMatch = task.query.match(/<code>([\s\S]*?)<\/code>/);
+            if (codeMatch) {
+                inputCode = codeMatch[1].replace(/\\n/g, '\n');
+            }
+
+            // 出力から実際のコードを抽出（```で囲まれている場合）
+            let outputCode = task.generation;
+            const codeBlockMatch = task.generation.match(/```(?:\w+)?\n([\s\S]*?)```/);
+            if (codeBlockMatch) {
+                outputCode = codeBlockMatch[1];
+            }
+
+            // ビュー切り替えボタンを生成
+            function createViewToggle(format, containerId) {
+                if (format === 'csv') {
+                    return `
+                        <div class="view-toggle">
+                            <button class="active" onclick="switchView('${format}', 'table', '${containerId}')">Table</button>
+                            <button onclick="switchView('${format}', 'code', '${containerId}')">Code</button>
+                        </div>
+                    `;
+                } else if (format === 'xml' || format === 'html') {
+                    return `
+                        <div class="view-toggle">
+                            <button class="active" onclick="switchView('${format}', 'tree', '${containerId}')">Tree</button>
+                            <button onclick="switchView('${format}', 'code', '${containerId}')">Code</button>
+                        </div>
+                    `;
+                }
+                return '';
+            }
+
+            // コンテンツを生成（デフォルトビュー）
+            function createContent(format, code, lang) {
+                if (format === 'csv') {
+                    return renderCsvTable(code);
+                } else if (format === 'xml' || format === 'html') {
+                    return renderXmlTree(code, `output-container`);
+                } else {
+                    return `<pre class="language-${lang} text-sm"><code class="language-${lang}">${escapeHtml(code)}</code></pre>`;
+                }
+            }
+
+            const html = `
+                <div class="mb-6">
+                    <h2 class="text-2xl font-bold text-gray-800 mb-2">${task.task_name}</h2>
+                    <p class="text-sm text-gray-500 mb-1"><strong>Task ID:</strong> ${task.task_id}</p>
+                    <div class="flex gap-2 items-center mt-2">
+                        <span class="format-badge ${inputBadgeColor} text-white">${formats.input}</span>
+                        <span class="text-gray-400">→</span>
+                        <span class="format-badge ${outputBadgeColor} text-white">${formats.output}</span>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-2 gap-6 mb-6">
+                    <!-- 入力 (Query) -->
+                    <div id="input-container" data-content="${escapeHtml(inputCode)}">
+                        <div class="flex justify-between items-center mb-2">
+                            <h3 class="text-lg font-semibold text-gray-700">
+                                入力 (Query)
+                                <span class="text-sm font-normal text-gray-500">- ${formats.input}</span>
+                            </h3>
+                            ${createViewToggle(formats.input, 'input-container')}
+                        </div>
+                        <div class="bg-gray-900 rounded-lg h-96 overflow-y-auto content-display">
+                            ${createContent(formats.input, inputCode, inputLang)}
+                        </div>
+                    </div>
+
+                    <!-- 出力 (Generation) -->
+                    <div id="output-container" data-content="${escapeHtml(outputCode)}">
+                        <div class="flex justify-between items-center mb-2">
+                            <h3 class="text-lg font-semibold text-gray-700">
+                                出力 (Generation)
+                                <span class="text-sm font-normal text-gray-500">- ${formats.output}</span>
+                            </h3>
+                            ${createViewToggle(formats.output, 'output-container')}
+                        </div>
+                        <div class="bg-gray-900 rounded-lg h-96 overflow-y-auto content-display">
+                            ${createContent(formats.output, outputCode, outputLang)}
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 編集エリア -->
+                <div class="mb-6">
+                    <h3 class="text-lg font-semibold mb-2 text-gray-700">出力を編集</h3>
+                    <textarea id="generation-editor"
+                              class="w-full h-64 p-4 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono text-sm"
+                              placeholder="ここで出力を編集...">${escapeHtml(task.generation)}</textarea>
+                </div>
+
+                <div class="flex gap-4">
+                    <button onclick="saveGeneration('${task.task_id}')"
+                            class="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">
+                        保存
+                    </button>
+                    <button onclick="resetEditor('${task.task_id}')"
+                            class="px-6 py-2 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400 transition">
+                        リセット
+                    </button>
+                    <div id="save-status" class="flex items-center text-sm"></div>
+                </div>
+            `;
+            document.getElementById('task-detail').innerHTML = html;
+
+            // Prism.jsで再ハイライト
+            Prism.highlightAll();
+        }
+
+        function saveGeneration(taskId) {
+            const generation = document.getElementById('generation-editor').value;
+            const statusDiv = document.getElementById('save-status');
+
+            fetch(`/api/task/${taskId}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ generation })
+            })
+            .then(res => res.json())
+            .then(data => {
+                statusDiv.innerHTML = '<span class="text-green-600">✓ 保存しました</span>';
+                setTimeout(() => statusDiv.innerHTML = '', 3000);
+            })
+            .catch(err => {
+                statusDiv.innerHTML = '<span class="text-red-600">✗ 保存に失敗しました</span>';
+            });
+        }
+
+        function resetEditor(taskId) {
+            fetch(`/api/task/${taskId}`)
+                .then(res => res.json())
+                .then(task => {
+                    document.getElementById('generation-editor').value = task.generation;
+                });
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+    </script>
+</body>
+</html>
