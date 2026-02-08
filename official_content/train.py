@@ -1,6 +1,36 @@
 from dotenv import load_dotenv
+import argparse
+import sys
+import os
+import json
+import shutil
+import random
+from typing import List, Dict, Any, Tuple
+from dataclasses import dataclass
 
-load_dotenv("/home/nkutm/workspace/2025-llm-advance-competition-main/official_content/execution.env")
+import numpy as np
+import torch
+from datasets import Dataset, load_dataset
+from transformers import Trainer, TrainingArguments, TrainerCallback
+from unsloth import FastLanguageModel
+import mlflow
+
+# コマンドライン引数でstageを指定
+parser = argparse.ArgumentParser(description="Multi-stage training script")
+parser.add_argument("--stage", type=int, default=1, help="Training stage number (1, 2, 3, ...)")
+args = parser.parse_args()
+
+STAGE = args.stage
+print(f"[INFO] Training Stage: {STAGE}")
+
+# 指定されたstageのenvファイルを読み込む
+stage_env_path = f"/home/nkutm/workspace/2025-llm-advance-competition-main/official_content/stage{STAGE}.env"
+if not os.path.exists(stage_env_path):
+    print(f"[ERROR] Stage env file not found: {stage_env_path}")
+    sys.exit(1)
+
+load_dotenv(stage_env_path)
+print(f"[INFO] Loaded env from: {stage_env_path}")
 
 # -----------------------------
 # 2.1) Config (env-overridable)
@@ -33,8 +63,15 @@ BASE_MODEL_ID = _getenv("SFT_BASE_MODEL", "Qwen/Qwen3-4B-Instruct-2507")
 # 学習に使うSFTデータセット（HF Hub上に置かれている想定）
 DATASET_ID    = _getenv("SFT_DATASET_ID", "u-10bei/structured_data_with_cot_dataset_512_v2")
 
+# 複数データセットのMix設定（JSON形式）
+# 例: [{"id": "dataset1", "weight": 1.0, "split": "train"}, {"id": "dataset2", "weight": 2.0}]
+# weightが大きいほど、そのデータセットからより多くサンプリングされます
+DATASET_MIX_JSON = _getenv("SFT_DATASET_MIX", "")
+
 # 学習後に保存されるLoRAアダプタの出力先（ローカル）
 OUT_LORA_DIR  = _getenv("SFT_OUT_LORA_DIR", "/content/lora_structeval_t_qwen3_4b") # HFアップロードするアダプタ名と合わせる
+# stageごとに別のディレクトリに保存
+OUT_LORA_DIR = f"{OUT_LORA_DIR}_stage{STAGE}"
 
 SEED        = _getenv_int("SFT_SEED", 3407)
 VAL_RATIO   = _getenv_float("SFT_VAL_RATIO", 0.05)
@@ -296,8 +333,6 @@ class AssistantOnlyCollatorCached:
             tok.truncation_side = old_trunc
             tok.padding_side    = old_pad
 
-import random, torch
-
 @torch.no_grad()
 def filter_has_supervision(ds, collator):
     keep = []
@@ -331,6 +366,132 @@ def count_all_masked(ds, collator, n=200, seed=3407):
 # ただし、やりすぎると他が弱くなることもあります（トレードオフ）。
 # 学習データセットの品質が悪い等の原因で、却って性能が低下することもあります。
 # その場合、学習データセットを観察し、追加の前処理が有効であることも多いです。
+
+def load_and_mix_datasets() -> Dataset:
+    """
+    複数のデータセットをロードして重み付きで混合します。
+
+    DATASET_MIX_JSONが設定されている場合はそれを使用し、
+    設定されていない場合は単一のDATASET_IDを使用します。
+
+    Returns:
+        Dataset: 混合されたデータセット
+    """
+    if not DATASET_MIX_JSON or DATASET_MIX_JSON.strip() == "":
+        # 単一データセットモード（後方互換性）
+        print(f"[INFO] Loading single dataset from HF Hub: {DATASET_ID}")
+        return load_dataset(DATASET_ID, split="train")
+
+    # 複数データセットMixモード
+    try:
+        mix_config = json.loads(DATASET_MIX_JSON)
+        if not isinstance(mix_config, list) or len(mix_config) == 0:
+            print("[WARNING] Invalid DATASET_MIX format, falling back to single dataset")
+            return load_dataset(DATASET_ID, split="train")
+    except Exception as e:
+        print(f"[WARNING] Failed to parse DATASET_MIX: {e}, falling back to single dataset")
+        return load_dataset(DATASET_ID, split="train")
+
+    print(f"[INFO] Loading and mixing {len(mix_config)} datasets...")
+
+    datasets = []
+    weights = []
+
+    for i, cfg in enumerate(mix_config):
+        if not isinstance(cfg, dict):
+            print(f"[WARNING] Skipping invalid config at index {i}: {cfg}")
+            continue
+
+        dataset_id = cfg.get("id", None)
+        weight = cfg.get("weight", 1.0)
+        split = cfg.get("split", "train")
+
+        if not dataset_id:
+            print(f"[WARNING] Skipping config without 'id' at index {i}")
+            continue
+
+        try:
+            weight = float(weight)
+            if weight <= 0:
+                print(f"[WARNING] Skipping dataset {dataset_id} with non-positive weight {weight}")
+                continue
+        except Exception:
+            print(f"[WARNING] Invalid weight for {dataset_id}, using 1.0")
+            weight = 1.0
+
+        print(f"[INFO] Loading dataset {i+1}/{len(mix_config)}: {dataset_id} (split={split}, weight={weight})")
+
+        try:
+            ds = load_dataset(dataset_id, split=split)
+            print(f"  -> Loaded {len(ds)} samples")
+            datasets.append(ds)
+            weights.append(weight)
+        except Exception as e:
+            print(f"[ERROR] Failed to load {dataset_id}: {e}")
+            continue
+
+    if len(datasets) == 0:
+        print("[ERROR] No datasets loaded successfully, falling back to single dataset")
+        return load_dataset(DATASET_ID, split="train")
+
+    if len(datasets) == 1:
+        print("[INFO] Only one dataset loaded, returning as-is")
+        return datasets[0]
+
+    # 重み付きサンプリングでデータセットを混合
+    print(f"[INFO] Mixing {len(datasets)} datasets with weights: {weights}")
+
+    # 各データセットのサイズを計算
+    total_weight = sum(weights)
+    normalized_weights = [w / total_weight for w in weights]
+
+    # 目標サンプル数を決定（最大のデータセットサイズを基準）
+    max_size = max(len(ds) for ds in datasets)
+    target_samples = [int(max_size * w) for w in normalized_weights]
+
+    print(f"[INFO] Target sample counts: {target_samples} (total: {sum(target_samples)})")
+
+    # 各データセットからサンプリング
+    mixed_indices = []
+    for i, (ds, target) in enumerate(zip(datasets, target_samples)):
+        ds_len = len(ds)
+        if target <= ds_len:
+            # ダウンサンプリング
+            sampled_indices = np.random.choice(ds_len, size=target, replace=False)
+        else:
+            # アップサンプリング
+            sampled_indices = np.random.choice(ds_len, size=target, replace=True)
+
+        # データセットインデックスとサンプルインデックスのペアを保存
+        mixed_indices.extend([(i, idx) for idx in sampled_indices])
+
+    # シャッフル
+    np.random.shuffle(mixed_indices)
+
+    # 混合データセットを構築
+    print(f"[INFO] Building mixed dataset with {len(mixed_indices)} samples...")
+
+    # すべてのサンプルを収集
+    all_samples = []
+    for ds_idx, sample_idx in mixed_indices:
+        all_samples.append(datasets[ds_idx][int(sample_idx)])
+
+    # Datasetオブジェクトとして構築
+    from datasets import Dataset
+
+    # サンプルから列名を取得
+    if len(all_samples) > 0:
+        column_names = list(all_samples[0].keys())
+        # 各列のデータを収集
+        columns_data = {col: [sample[col] for sample in all_samples] for col in column_names}
+        mixed_dataset = Dataset.from_dict(columns_data)
+    else:
+        mixed_dataset = datasets[0].select([])  # 空のデータセット
+
+    print(f"[INFO] Mixed dataset created with {len(mixed_dataset)} samples")
+
+    return mixed_dataset
+
 
 def apply_upsampling(train_ds: Dataset) -> Dataset:
     if not UPSAMPLE_ENABLE or not UPSAMPLE_RULES_JSON:
@@ -407,14 +568,22 @@ class LabelStatsCallback(TrainerCallback):
 # 学習を実行します。
 
 def main():
+    # MLflow設定：リポジトリ内のmlrunsディレクトリに記録
+    REPO_ROOT = "/home/nkutm/workspace/2025-llm-advance-competition-main"
+    mlflow_tracking_uri = f"file://{REPO_ROOT}/mlruns"
+    mlflow.set_tracking_uri(mlflow_tracking_uri)
+    mlflow.set_experiment(_getenv("MLFLOW_EXPERIMENT_NAME", f"llm-training-stage{STAGE}"))
+    print(f"[INFO] MLflow tracking URI: {mlflow_tracking_uri}")
+    print(f"[INFO] MLflow experiment: {mlflow.get_experiment_by_name(_getenv('MLFLOW_EXPERIMENT_NAME', f'llm-training-stage{STAGE}')).name if mlflow.get_experiment_by_name(_getenv('MLFLOW_EXPERIMENT_NAME', f'llm-training-stage{STAGE}')) else 'will be created'}")
+
     os.makedirs(OUT_LORA_DIR, exist_ok=True)
 
     # if you used /content/your_id cache dirs etc, remove to avoid confusion
     if os.path.exists("/content/your_id"):
         shutil.rmtree("/content/your_id")
 
-    print(f"[INFO] Loading dataset from HF Hub: {DATASET_ID}")
-    ds_all = load_dataset(DATASET_ID, split="train")
+    # データセットのロード（単一または複数の混合）
+    ds_all = load_and_mix_datasets()
 
     # データ形式チェック（messagesがlistであること）
     ensure_openai_messages(ds_all)
@@ -431,13 +600,67 @@ def main():
 
     print("[INFO] Loading base model:", BASE_MODEL_ID)
 
-    # Unslothでベースモデルを読み込む（4bitロードで省メモリ）
+    # ベースモデルをロード
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=BASE_MODEL_ID,
         max_seq_length=MAX_SEQ_LEN,
-        dtype=None,
+        dtype=torch.bfloat16,  # RTX 5080などの新しいGPUではbfloat16を使用
         load_in_4bit=True,
     )
+
+    # 前のstageのアダプターがある場合はマージしてから新しいLoRAを追加
+    # この方法により、前のstageの学習結果を引き継ぎます
+    if STAGE > 1:
+        prev_adapter_dir = OUT_LORA_DIR.replace(f"stage{STAGE}", f"stage{STAGE-1}")
+
+        if os.path.exists(prev_adapter_dir) and os.path.exists(os.path.join(prev_adapter_dir, "adapter_config.json")):
+            print(f"[INFO] Stage {STAGE}: Merging previous adapter from {prev_adapter_dir}")
+
+            # 前のアダプターをロードしてマージ
+            # まず16bitでロードし直す必要があるため、一度unloadする
+            print(f"[INFO] Reloading model in 16bit for merging...")
+            model_16bit, _ = FastLanguageModel.from_pretrained(
+                model_name=BASE_MODEL_ID,
+                max_seq_length=MAX_SEQ_LEN,
+                dtype=torch.float16,
+                load_in_4bit=False,
+            )
+
+            # 前のアダプターを適用
+            from peft import PeftModel
+            model_16bit = PeftModel.from_pretrained(model_16bit, prev_adapter_dir)
+            print(f"[INFO] Loaded adapter from stage {STAGE-1}")
+
+            # マージしてベースモデルに統合
+            print(f"[INFO] Merging adapter into base model...")
+            model_merged = model_16bit.merge_and_unload()
+
+            # マージ済みモデルを一時保存
+            merged_model_path = f"{OUT_LORA_DIR}_merged_base"
+            os.makedirs(merged_model_path, exist_ok=True)
+            model_merged.save_pretrained(merged_model_path)
+            tokenizer.save_pretrained(merged_model_path)
+            print(f"[INFO] Saved merged model to {merged_model_path}")
+
+            # メモリ解放
+            del model_16bit, model_merged
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            # マージ済みモデルを4bitでロード
+            print(f"[INFO] Reloading merged model in 4bit...")
+            model, tokenizer = FastLanguageModel.from_pretrained(
+                model_name=merged_model_path,
+                max_seq_length=MAX_SEQ_LEN,
+                dtype=torch.bfloat16,  # RTX 5080などの新しいGPUではbfloat16を使用
+                load_in_4bit=True,
+            )
+            print(f"[INFO] Successfully loaded merged model for stage {STAGE}")
+        else:
+            print(f"[WARNING] Previous stage adapter not found at {prev_adapter_dir}, starting from base model")
+    else:
+        # Stage 1: ベースモデルから開始
+        print(f"[INFO] Stage 1: Starting from base model")
 
     # Cache chat template renders（tokenizerが必要なのでここで初めてbuild_cacheを作る）
     build_cache = make_text_cache_builder(tokenizer)
@@ -483,11 +706,11 @@ def main():
 
         max_steps=MAX_STEPS,  # -1 => epoch-based
 
-        bf16=False,
-        fp16=True,            # T4向け（T4はbf16が弱いのでfp16を使うのが一般的）
+        bf16=True,            # RTX 5080などの新しいGPUではbfloat16を使用
+        fp16=False,
 
         push_to_hub=False,
-        report_to="none",
+        report_to="mlflow",
 
         group_by_length=False,
         remove_unused_columns=False,

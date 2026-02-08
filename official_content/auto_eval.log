@@ -1,0 +1,7 @@
+================================================
+Training completion monitor started
+Log file: train_stage1.log
+Checking every 300 seconds...
+================================================
+[Sun Feb  8 04:56:12 UTC 2026] Training progress: 78/1500 steps
+[Sun Feb  8 05:01:03 UTC 2026] Training progress: 102/1500 steps

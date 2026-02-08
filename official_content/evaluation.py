@@ -2,7 +2,7 @@
 # 1) Config
 # ------------------------------------------------------------
 
-MODEL_SOURCE = "base"   # "merged" | "base" | "adapter_merge"
+MODEL_SOURCE = "adapter_merge"   # "merged" | "base" | "adapter_merge"
 # どのモデルを使うかを選びます。今回は、基本的に"adapter_merge"を選んでください。
 
 #   - "base"        : ベースモデル（学習していない素のモデル）
@@ -21,7 +21,8 @@ MERGED_MODEL_ID_OR_PATH = "your_id/your-merged-repo"
 # adapter merge
 # あなたがHuggingFaceにアップロードしたアダプタのIDを入れてください。
 # "adapter_merge"を選択した場合に記入
-ADAPTER_ID       = "your_id/test-lora-repo"
+# ローカルの学習済みアダプターを使用
+ADAPTER_ID       = "/home/nkutm/workspace/2025-llm-advance-competition-main/output/lora_structeval_t_qwen3_4b_stage1"
 
 # merge済モデルの一時保存
 MERGED_LOCAL_DIR = "./merged_model"
