@@ -89,10 +89,16 @@ get_all_mig_devices() {
     done < <(nvidia-smi -L 2>/dev/null)
 }
 
-# 使用中の GPU UUID を取得
+# 使用中の MIG UUID を取得 (MIG環境では nvidia-smi が親GPU UUIDを返すため
+# 各プロセスの CUDA_VISIBLE_DEVICES 環境変数から直接読む)
 get_busy_uuids() {
-    nvidia-smi --query-compute-apps=gpu_uuid --format=csv,noheader 2>/dev/null \
-        | tr -d ' ' || true
+    for env_file in /proc/*/environ; do
+        local cv
+        cv=$(tr '\0' '\n' < "$env_file" 2>/dev/null | grep '^CUDA_VISIBLE_DEVICES=MIG-' | cut -d= -f2 || true)
+        if [ -n "$cv" ]; then
+            echo "$cv"
+        fi
+    done
 }
 
 # 空き MIG インスタンスのインデックスを1つ選択して出力
@@ -112,7 +118,7 @@ find_free_mig() {
             continue
         fi
         if ! echo "$busy_uuids" | grep -qF "$uuid"; then
-            echo "$idx"  # 整数インデックスを返す
+            echo "$uuid"  # UUID を返す (torch/peft は UUID で動作; vLLM は呼び出し側で変換)
             return 0
         fi
     done <<< "$devices"

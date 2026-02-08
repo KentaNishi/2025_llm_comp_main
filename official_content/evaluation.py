@@ -22,14 +22,14 @@ MERGED_MODEL_ID_OR_PATH = "your_id/your-merged-repo"
 # あなたがHuggingFaceにアップロードしたアダプタのIDを入れてください。
 # "adapter_merge"を選択した場合に記入
 # ローカルの学習済みアダプターを使用
-ADAPTER_ID       = "/root/workspace/2025_llm_comp_main/output/lora_structeval_t_qwen3_4b_stage1/checkpoint-19"
+ADAPTER_ID       = "/root/workspace/2025_llm_comp_main/output/lora_structeval_t_qwen3_4b_stage3/checkpoint-51"
 
 # merge済モデルの一時保存
 MERGED_LOCAL_DIR = "./merged_model"
 
 # 入力（150問）と出力（提出用）ファイルパスの指定
 INPUT_PATH  = "/root/workspace/2025_llm_comp_main/official_content/public_150.json"
-OUTPUT_PATH = "/root/workspace/2025_llm_comp_main/outputs/inference.json"
+OUTPUT_PATH = "/root/workspace/2025_llm_comp_main/outputs/stage3.json"
 
 
 TEMPERATURE = 0.0
@@ -217,6 +217,17 @@ TRY_CONFIGS = build_try_configs()
 # 6) vLLM run with retry
 # ------------------------------------------------------------
 # ↑ ここからが推論本体です。
+
+# vLLM は CUDA_VISIBLE_DEVICES に MIG UUID を受け付けないため整数インデックスに変換
+_cv = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+if _cv.startswith("MIG-"):
+    import subprocess as _sp
+    _lines = _sp.run(["nvidia-smi", "-L"], capture_output=True, text=True).stdout.splitlines()
+    for _i, _line in enumerate(_lines):
+        if _cv in _line:
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(_i)
+            print(f"[INFO] CUDA_VISIBLE_DEVICES: {_cv} -> {_i}")
+            break
 
 from vllm import LLM, SamplingParams
 def run_with_config(cfg):

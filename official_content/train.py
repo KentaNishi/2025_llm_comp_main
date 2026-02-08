@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 from datasets import Dataset, load_dataset
-from transformers import Trainer, TrainingArguments, TrainerCallback
+from transformers import Trainer, TrainingArguments, TrainerCallback, EarlyStoppingCallback
 from unsloth import FastLanguageModel
 import mlflow
 
@@ -100,10 +100,11 @@ WARMUP_RATIO                = _getenv_float("SFT_WARMUP_RATIO", 0.1)
 
 # Debug / quick check
 # MAX_STEPSを小さくすると“動作確認だけ”の短時間学習ができます（本番は -1 のまま）
-MAX_STEPS        = _getenv_int("SFT_MAX_STEPS", -1)
-LOGGING_STEPS    = _getenv_int("SFT_LOGGING_STEPS", 10)
-EVAL_STEPS       = _getenv_int("SFT_EVAL_STEPS", 50)
-SAVE_STEPS       = _getenv_int("SFT_SAVE_STEPS", 100)
+MAX_STEPS              = _getenv_int("SFT_MAX_STEPS", -1)
+EARLY_STOPPING_PATIENCE = _getenv_int("SFT_EARLY_STOPPING_PATIENCE", -1)
+LOGGING_STEPS          = _getenv_int("SFT_LOGGING_STEPS", 10)
+EVAL_STEPS       = _getenv_int("SFT_EVAL_STEPS", 5)
+SAVE_STEPS       = _getenv_int("SFT_SAVE_STEPS", 10)
 SAVE_TOTAL_LIMIT = _getenv_int("SFT_SAVE_TOTAL_LIMIT", 2)
 WEIGHT_DECAY     = _getenv_float("SFT_WEIGHT_DECAY", 0.05)
 
@@ -724,8 +725,11 @@ def main():
         save_strategy="steps",
         save_steps=SAVE_STEPS,
         save_total_limit=SAVE_TOTAL_LIMIT,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
 
-        max_steps=-1,#MAX_STEPS,  # -1 => epoch-based
+        max_steps=MAX_STEPS,  # -1 => epoch-based
 
         bf16=True,            # RTX 5080などの新しいGPUではbfloat16を使用
         fp16=False,
@@ -765,6 +769,8 @@ def main():
 
     # 監視用コールバックを追加（学習が効いているかのヘルスチェック）
     trainer.add_callback(LabelStatsCallback(train_ds, collator, name="train", every_n_steps=LOGGING_STEPS))
+    if EARLY_STOPPING_PATIENCE > 0:
+        trainer.add_callback(EarlyStoppingCallback(early_stopping_patience=EARLY_STOPPING_PATIENCE))
 
     print("[INFO] Starting training...")
     trainer.train()
