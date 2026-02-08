@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Virtual environments
+.venv/
+.venv-train/
+.venv-eval/
+
+# MLflow experiment tracking
+mlruns/
+
+# Unsloth compiled cache
+unsloth_compiled_cache/
+
+# Training output (LoRA adapters, checkpoints)
+output/
+
+# Inference output
+outputs/
+
+# Tilde expansion error artifact
+~/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
